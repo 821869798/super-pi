@@ -403,6 +403,45 @@ describe("ask_user_question", () => {
       }
     }
   })
+
+  test("supports multiSelect returning joined answer and selected array", async () => {
+    const tool = createAskUserQuestionTool()
+    const options = ["Option A", "Option B", "Option C"]
+
+    const result = await tool.execute(
+      { question: "Choose features", options, multiSelect: true, allowCustom: false },
+      {
+        input: async () => null,
+        select: async (_q, displayOpts, multiSelect) => {
+          expect(multiSelect).toBe(true)
+          return [displayOpts[0], displayOpts[2]]
+        },
+      },
+    )
+
+    expect(result.answer).toBe("Option A, Option C")
+    expect(result.selected).toEqual(["Option A", "Option C"])
+    expect(result.mode).toBe("select")
+  })
+
+  test("supports multiSelect with custom answer combined", async () => {
+    const tool = createAskUserQuestionTool()
+    const options = ["Feature 1", "Feature 2"]
+
+    const result = await tool.execute(
+      { question: "Choose features", options, multiSelect: true, allowCustom: true },
+      {
+        input: async () => "Custom Feature 3",
+        select: async (_q, displayOpts) => {
+          return [displayOpts[0], displayOpts[2]]
+        },
+      },
+    )
+
+    expect(result.answer).toBe("Feature 1, Custom Feature 3")
+    expect(result.selected).toEqual(["Feature 1", "Custom Feature 3"])
+    expect(result.mode).toBe("select")
+  })
 })
 
 
@@ -2412,6 +2451,93 @@ describe("ask_user_question custom selector component", () => {
     collapsedSelector.handleInput("1")
     expect(captured).not.toBeNull()
     expect(captured.selectedLabel).toBe("A")
+  })
+
+  test("multiSelect renders checkboxes [ ] and toggles with Space", () => {
+    const selector = new AskUserQuestionSelector(
+      { question: "Choose multiple", displayOptions: ["Alpha", "Beta"], customLabel: null, multiSelect: true },
+      noopTheme,
+      () => {},
+    )
+    let lines = selector.render(60)
+    expect(lines.join("\n")).toContain("[ ] Alpha")
+    expect(lines.join("\n")).toContain("[ ] Beta")
+
+    // Press Space on Alpha (index 0)
+    selector.handleInput(" ")
+    lines = selector.render(60)
+    expect(lines.join("\n")).toContain("[✓] Alpha")
+    expect(lines.join("\n")).toContain("[ ] Beta")
+
+    // Press Space again to untoggle
+    selector.handleInput(" ")
+    lines = selector.render(60)
+    expect(lines.join("\n")).toContain("[ ] Alpha")
+  })
+
+  test("multiSelect toggles with number keys 1-9 without immediate commit", () => {
+    let captured: any = null
+    const selector = new AskUserQuestionSelector(
+      { question: "Choose multiple", displayOptions: ["Alpha", "Beta", "Gamma"], customLabel: null, multiSelect: true },
+      noopTheme,
+      (res) => { captured = res },
+    )
+    // Press '2' -> should toggle Beta, NOT commit
+    selector.handleInput("2")
+    expect(captured).toBeNull()
+
+    let lines = selector.render(60)
+    expect(lines.join("\n")).toContain("[✓] Beta")
+    expect(lines.join("\n")).toContain("[ ] Alpha")
+
+    // Press '1' -> toggle Alpha
+    selector.handleInput("1")
+    lines = selector.render(60)
+    expect(lines.join("\n")).toContain("[✓] Alpha")
+    expect(lines.join("\n")).toContain("[✓] Beta")
+
+    // Press Enter -> commit both
+    selector.handleInput("\r")
+    expect(captured).not.toBeNull()
+    expect(captured.selectedLabels).toEqual(["Alpha", "Beta"])
+    expect(captured.selectedLabel).toBe("Alpha, Beta")
+  })
+
+  test("multiSelect 'a' key toggles all items", () => {
+    let captured: any = null
+    const selector = new AskUserQuestionSelector(
+      { question: "Select all", displayOptions: ["A", "B", "C"], customLabel: null, multiSelect: true },
+      noopTheme,
+      (res) => { captured = res },
+    )
+    // Press 'a' -> select all
+    selector.handleInput("a")
+    let lines = selector.render(60)
+    expect(lines.join("\n")).toContain("[✓] A")
+    expect(lines.join("\n")).toContain("[✓] B")
+    expect(lines.join("\n")).toContain("[✓] C")
+
+    // Press 'a' again -> deselect all
+    selector.handleInput("a")
+    lines = selector.render(60)
+    expect(lines.join("\n")).toContain("[ ] A")
+    expect(lines.join("\n")).toContain("[ ] B")
+    expect(lines.join("\n")).toContain("[ ] C")
+  })
+
+  test("multiSelect Enter without toggling defaults to focused item", () => {
+    let captured: any = null
+    const selector = new AskUserQuestionSelector(
+      { question: "Pick one or more", displayOptions: ["Alpha", "Beta"], customLabel: null, multiSelect: true },
+      noopTheme,
+      (res) => { captured = res },
+    )
+    // Move down to Beta
+    selector.handleInput("\u001b[B")
+    // Press Enter directly
+    selector.handleInput("\r")
+    expect(captured).not.toBeNull()
+    expect(captured.selectedLabels).toEqual(["Beta"])
   })
 })
 

@@ -15,12 +15,14 @@ import {
  */
 export interface AskUserQuestionSelection {
   selectedLabel: string | null
+  selectedLabels?: string[] | null
 }
 
 interface AskUserQuestionCustomOptions {
   question: string
   displayOptions: string[]
   customLabel: string | null
+  multiSelect?: boolean
 }
 
 /**
@@ -44,9 +46,12 @@ function renderQuestionLines(question: string, width: number, fg: (color: string
  * Renders a wrapped (multi-line) question and a list of single-line options.
  * Handles:
  * - up/down navigation with scroll offset
+ * - 1-9 direct selection (single) or toggling (multi)
+ * - Space to toggle checkbox (multi)
  * - Enter to confirm
  * - Escape / cancel keybinding to cancel
  * - optional "Other" custom entry label
+ * - Ctrl+] to peek terminal output above
  *
  * Built to work inside Pi's `ctx.ui.custom()` factory contract:
  * `(tui, theme, keybindings, done) => Component`.
@@ -55,6 +60,8 @@ export class AskUserQuestionSelector extends Container {
   private readonly options: string[]
   private readonly question: string
   private readonly customLabel: string | null
+  private readonly multiSelect: boolean
+  private readonly selectedIndices = new Set<number>()
   private readonly theme: { fg: (color: string, text: string) => string }
   private readonly done: (result: AskUserQuestionSelection) => void
   private selectedIndex = 0
@@ -71,16 +78,50 @@ export class AskUserQuestionSelector extends Container {
     this.options = opts.displayOptions
     this.question = opts.question
     this.customLabel = opts.customLabel
+    this.multiSelect = opts.multiSelect ?? false
     this.theme = theme
     this.done = done
   }
 
-  /** Resolve a selected display label into the result handed to `done()`. */
+  /** Resolve a single selected display label into the result handed to `done()`. */
   private commit(index: number): void {
     if (this.resolved) return
     this.resolved = true
     const selected = this.options[index] ?? null
-    this.done({ selectedLabel: selected })
+    this.done({ selectedLabel: selected, selectedLabels: selected ? [selected] : null })
+  }
+
+  /** Resolve multiple selected display labels into the result handed to `done()`. */
+  private commitMulti(): void {
+    if (this.resolved) return
+    this.resolved = true
+    const indices = this.selectedIndices.size > 0
+      ? Array.from(this.selectedIndices).sort((a, b) => a - b)
+      : [this.selectedIndex]
+    const selectedLabels = indices.map((i) => this.options[i]).filter(Boolean)
+    this.done({
+      selectedLabel: selectedLabels.join(", "),
+      selectedLabels,
+    })
+  }
+
+  private toggle(index: number): void {
+    if (index < 0 || index >= this.options.length) return
+    if (this.selectedIndices.has(index)) {
+      this.selectedIndices.delete(index)
+    } else {
+      this.selectedIndices.add(index)
+    }
+  }
+
+  private toggleAll(): void {
+    if (this.selectedIndices.size === this.options.length) {
+      this.selectedIndices.clear()
+    } else {
+      for (let i = 0; i < this.options.length; i++) {
+        this.selectedIndices.add(i)
+      }
+    }
   }
 
   handleInput(data: string): void {
@@ -94,16 +135,35 @@ export class AskUserQuestionSelector extends Container {
       if (matchesKey(data, Key.escape)) {
         if (this.resolved) return
         this.resolved = true
-        this.done({ selectedLabel: null })
+        this.done({ selectedLabel: null, selectedLabels: null })
       }
       return
     }
 
-    // Number keys 1-9 for quick direct option picking
+    // Number keys 1-9 for quick direct option picking or toggling
     const num = parseInt(data, 10)
     if (!isNaN(num) && num >= 1 && num <= Math.min(9, this.options.length)) {
-      this.commit(num - 1)
+      if (this.multiSelect) {
+        this.toggle(num - 1)
+      } else {
+        this.commit(num - 1)
+      }
       return
+    }
+
+    if (this.multiSelect) {
+      if (data === " " || matchesKey(data, Key.space)) {
+        this.toggle(this.selectedIndex)
+        return
+      }
+      if (data === "a" || data === "A") {
+        this.toggleAll()
+        return
+      }
+      if (matchesKey(data, Key.enter) || data === "\n" || data === "\r") {
+        this.commitMulti()
+        return
+      }
     }
 
     if (matchesKey(data, Key.up) || data === "k") {
@@ -113,12 +173,12 @@ export class AskUserQuestionSelector extends Container {
       this.selectedIndex = Math.min(this.options.length - 1, this.selectedIndex + 1)
       const maxStart = Math.max(0, this.selectedIndex - MAX_VISIBLE_ROWS + 1)
       this.scrollOffset = Math.max(this.scrollOffset, maxStart)
-    } else if (matchesKey(data, Key.enter) || data === "\n") {
+    } else if (matchesKey(data, Key.enter) || data === "\n" || data === "\r") {
       this.commit(this.selectedIndex)
     } else if (matchesKey(data, Key.escape)) {
       if (this.resolved) return
       this.resolved = true
-      this.done({ selectedLabel: null })
+      this.done({ selectedLabel: null, selectedLabels: null })
     }
   }
 
@@ -155,7 +215,12 @@ export class AskUserQuestionSelector extends Container {
       const isSelected = optionIndex === this.selectedIndex
       const isCustom = this.customLabel !== null && visible[i] === this.customLabel
       const numPrefix = optionIndex < 9 ? `${optionIndex + 1}. ` : "   "
-      const prefix = isSelected ? fg("accent", `→ ${numPrefix}`) : `  ${numPrefix}`
+      const checkbox = this.multiSelect
+        ? this.selectedIndices.has(optionIndex)
+          ? fg("accent", "[✓] ")
+          : fg("dim", "[ ] ")
+        : ""
+      const prefix = isSelected ? fg("accent", `→ ${numPrefix}${checkbox}`) : `  ${numPrefix}${checkbox}`
       const marker = isCustom ? fg("muted", " ✎") : ""
       lines.push(truncateToWidth(`${prefix}${fg(isSelected ? "accent" : "text", visible[i])}${marker}`, width))
     }
@@ -170,12 +235,10 @@ export class AskUserQuestionSelector extends Container {
     }
 
     lines.push("")
-    lines.push(
-      truncateToWidth(
-        fg("dim", " ↑↓/jk navigate · 1-9 pick · Ctrl+] peek · Enter select · Esc cancel"),
-        width,
-      ),
-    )
+    const hintText = this.multiSelect
+      ? " ↑↓/jk navigate · Space/1-9 toggle · a all · Enter confirm · Ctrl+] peek · Esc cancel"
+      : " ↑↓/jk navigate · 1-9 pick · Ctrl+] peek · Enter select · Esc cancel"
+    lines.push(truncateToWidth(fg("dim", hintText), width))
     lines.push(truncateToWidth(fg("accent", "─".repeat(width)), width))
     return lines
   }

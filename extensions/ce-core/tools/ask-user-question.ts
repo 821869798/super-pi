@@ -8,6 +8,7 @@ export interface SingleQuestionInput {
   question: string
   options?: QuestionOption[]
   allowCustom?: boolean
+  multiSelect?: boolean
   header?: string
 }
 
@@ -15,17 +16,19 @@ export interface AskUserQuestionInput {
   question?: string
   options?: QuestionOption[]
   allowCustom?: boolean
+  multiSelect?: boolean
   questions?: SingleQuestionInput[]
 }
 
 export interface AskUserQuestionUi {
   input(question: string): Promise<string | null>
-  select(question: string, options: string[]): Promise<string | null>
+  select(question: string, options: string[], multiSelect?: boolean): Promise<string | string[] | null>
 }
 
 export interface AskUserQuestionResult {
   answer: string | null
   mode: "input" | "select" | "custom" | "cancelled"
+  selected?: string[]
 }
 
 /** Sentinel label used to offer a free-text custom answer. */
@@ -172,6 +175,7 @@ export function createAskUserQuestionTool() {
               question: q.question,
               options: q.options,
               allowCustom: q.allowCustom,
+              multiSelect: q.multiSelect,
             },
             ui,
           )
@@ -197,6 +201,7 @@ export function createAskUserQuestionTool() {
       }
 
       const allowCustom = input.allowCustom ?? true
+      const multiSelect = input.multiSelect ?? false
       const labelToOriginal = normalizeQuestionOptions(options)
       const customLabel = allowCustom
         ? resolveCustomSentinelLabel(labelToOriginal)
@@ -205,21 +210,51 @@ export function createAskUserQuestionTool() {
         ? [...labelToOriginal.keys(), customLabel]
         : [...labelToOriginal.keys()]
 
-      const selected = await ui.select(questionText, displayOptions)
+      const selected = await ui.select(questionText, displayOptions, multiSelect)
 
       if (selected === null) {
         return { answer: null, mode: "cancelled" }
       }
 
-      if (allowCustom && customLabel && selected === customLabel) {
+      if (multiSelect) {
+        const selectedArray = Array.isArray(selected) ? selected : [selected]
+        const finalAnswers: string[] = []
+        for (const item of selectedArray) {
+          if (allowCustom && customLabel && item === customLabel) {
+            const customAnswer = await ui.input("Your answer")
+            if (customAnswer !== null && customAnswer.trim().length > 0) {
+              finalAnswers.push(customAnswer.trim())
+            }
+          } else {
+            finalAnswers.push(labelToOriginal.get(item) ?? item)
+          }
+        }
+        if (finalAnswers.length === 0) {
+          return { answer: null, mode: "cancelled" }
+        }
+        return {
+          answer: finalAnswers.join(", "),
+          selected: finalAnswers,
+          mode: "select",
+        }
+      }
+
+      const singleSelected = Array.isArray(selected) ? selected[0] : selected
+      if (!singleSelected) {
+        return { answer: null, mode: "cancelled" }
+      }
+
+      if (allowCustom && customLabel && singleSelected === customLabel) {
         const customAnswer = await ui.input("Your answer")
         return customAnswer === null
           ? { answer: null, mode: "cancelled" }
           : { answer: customAnswer, mode: "custom" }
       }
 
+      const original = labelToOriginal.get(singleSelected) ?? singleSelected
       return {
-        answer: labelToOriginal.get(selected) ?? selected,
+        answer: original,
+        selected: [original],
         mode: "select",
       }
     },

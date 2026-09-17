@@ -60,7 +60,7 @@ function buildAskUserQuestionUi(ctx: any): import("./tools/ask-user-question").A
     return { input, select: selectFallback }
   }
 
-  const select = async (question: string, options: string[]): Promise<string | null> => {
+  const select = async (question: string, options: string[], multiSelect?: boolean): Promise<string | string[] | null> => {
     // The custom sentinel is appended last (if present) and matches
     // `CUSTOM_SENTINEL` or a `CUSTOM_SENTINEL (#n)` disambiguation suffix.
     const last = options.length > 0 ? options[options.length - 1] : null
@@ -72,9 +72,13 @@ function buildAskUserQuestionUi(ctx: any): import("./tools/ask-user-question").A
       question,
       displayOptions: options,
       customLabel,
+      multiSelect,
     })
     const selection = (await ctx.ui.custom(factory)) as
-      { selectedLabel: string | null } | null | undefined
+      { selectedLabel: string | null; selectedLabels?: string[] | null } | null | undefined
+    if (multiSelect && selection?.selectedLabels !== undefined) {
+      return selection.selectedLabels
+    }
     return selection?.selectedLabel ?? null
   }
 
@@ -101,11 +105,13 @@ const askUserQuestionParams = Type.Object({
   question: Type.Optional(Type.String({ description: "Question shown to the user" })),
   options: Type.Optional(Type.Array(Type.Any(), { description: "Selectable options (strings or {label, description} objects)" })),
   allowCustom: Type.Optional(Type.Boolean({ description: "Allow a custom answer when options are present" })),
+  multiSelect: Type.Optional(Type.Boolean({ description: "Allow selecting multiple options (Space/1-9 to toggle, Enter to confirm)" })),
   questions: Type.Optional(Type.Array(Type.Object({
     question: Type.String({ description: "Question shown to the user" }),
     header: Type.Optional(Type.String({ description: "Optional header or category for the question" })),
     options: Type.Optional(Type.Array(Type.Any(), { description: "Selectable options" })),
     allowCustom: Type.Optional(Type.Boolean({ description: "Allow custom answer" })),
+    multiSelect: Type.Optional(Type.Boolean({ description: "Allow selecting multiple options" })),
   }), { description: "Optional batch of questions to ask" })),
 })
 
@@ -334,6 +340,7 @@ export default function ceCoreExtension(pi: ExtensionAPI) {
             question: params.question,
             options: params.options,
             allowCustom: params.allowCustom,
+            multiSelect: params.multiSelect,
             questions: params.questions,
           },
           buildAskUserQuestionUi(ctx),
