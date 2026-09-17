@@ -126,9 +126,13 @@ export class AskUserQuestionSelector extends Container {
     const fg = this.theme.fg.bind(this.theme)
 
     if (this.isCollapsed) {
+      const hint = " [Collapsed · Ctrl+] to expand]"
+      const avail = Math.max(10, width - hint.length - 2)
+      const firstLine = this.question.split("\n", 1)[0] ?? ""
+      const qSummary = firstLine.length > avail ? `${firstLine.slice(0, avail - 1)}…` : firstLine
       return [
         truncateToWidth(fg("accent", "─".repeat(width)), width),
-        truncateToWidth(fg("dim", ` [Collapsed] ${this.question} (Press Ctrl+] to expand)`), width),
+        truncateToWidth(fg("dim", `${hint} ${qSummary}`), width),
         truncateToWidth(fg("accent", "─".repeat(width)), width),
       ]
     }

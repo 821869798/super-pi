@@ -2393,7 +2393,7 @@ describe("ask_user_question custom selector component", () => {
     // Press Ctrl+] (\u001d)
     selector.handleInput("\u001d")
     lines = selector.render(60)
-    expect(lines.join("\n")).toContain("Press Ctrl+] to expand")
+    expect(lines.join("\n")).toContain("Ctrl+] to expand")
     expect(lines.join("\n")).not.toContain("1. A")
 
     // Pressing option numbers while collapsed should not select
