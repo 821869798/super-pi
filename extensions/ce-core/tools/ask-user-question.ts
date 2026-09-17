@@ -1,34 +1,19 @@
-import { readFileSync } from "node:fs"
-import path from "node:path"
-import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent"
-
 export type QuestionOption = string | { label: string; description?: string }
 
-export interface SingleQuestionInput {
+export interface AskUserQuestionInput {
   question: string
   options?: QuestionOption[]
   allowCustom?: boolean
-  multiSelect?: boolean
-  header?: string
-}
-
-export interface AskUserQuestionInput {
-  question?: string
-  options?: QuestionOption[]
-  allowCustom?: boolean
-  multiSelect?: boolean
-  questions?: SingleQuestionInput[]
 }
 
 export interface AskUserQuestionUi {
   input(question: string): Promise<string | null>
-  select(question: string, options: string[], multiSelect?: boolean): Promise<string | string[] | null>
+  select(question: string, options: string[]): Promise<string | null>
 }
 
 export interface AskUserQuestionResult {
   answer: string | null
   mode: "input" | "select" | "custom" | "cancelled"
-  selected?: string[]
 }
 
 /** Sentinel label used to offer a free-text custom answer. */
@@ -119,46 +104,6 @@ export function resolveCustomSentinelLabel(labelToOriginal: Map<string, string>)
   return `${CUSTOM_SENTINEL} (#${index})`
 }
 
-/**
- * Determine whether the built-in ask_user_question tool should be disabled,
- * e.g. to coexist with third-party extensions like @juicesharp/rpiv-ask-user-question.
- */
-export function isAskUserQuestionDisabled(cwd: string = process.cwd()): boolean {
-  if (process.env.SUPER_PI_DISABLE_ASK_USER_QUESTION === "1") {
-    return true
-  }
-  const configDir = CONFIG_DIR_NAME || ".pi"
-  const projectPath = path.join(cwd, configDir, "settings.json")
-  try {
-    const raw = readFileSync(projectPath, "utf8")
-    const parsed = JSON.parse(raw)
-    if (parsed.disableBuiltinAskUserQuestion === true || parsed.externalAskUserQuestion === true) {
-      return true
-    }
-  } catch {}
-
-  const home = process.env.HOME || process.env.USERPROFILE || "~"
-  const globalPath = path.join(home, configDir, "agent", "settings.json")
-  try {
-    const raw = readFileSync(globalPath, "utf8")
-    const parsed = JSON.parse(raw)
-    if (parsed.disableBuiltinAskUserQuestion === true || parsed.externalAskUserQuestion === true) {
-      return true
-    }
-  } catch {}
-
-  const altGlobalPath = path.join(home, configDir, "settings.json")
-  try {
-    const raw = readFileSync(altGlobalPath, "utf8")
-    const parsed = JSON.parse(raw)
-    if (parsed.disableBuiltinAskUserQuestion === true || parsed.externalAskUserQuestion === true) {
-      return true
-    }
-  } catch {}
-
-  return false
-}
-
 export function createAskUserQuestionTool() {
   return {
     name: "ask_user_question",
@@ -166,43 +111,15 @@ export function createAskUserQuestionTool() {
       input: AskUserQuestionInput,
       ui: AskUserQuestionUi,
     ): Promise<AskUserQuestionResult> {
-      // Support batch/canonical questions array
-      if (input.questions && input.questions.length > 0) {
-        const answers: string[] = []
-        for (const q of input.questions) {
-          const singleResult = await this.execute(
-            {
-              question: q.question,
-              options: q.options,
-              allowCustom: q.allowCustom,
-              multiSelect: q.multiSelect,
-            },
-            ui,
-          )
-          if (singleResult.answer === null) {
-            return { answer: null, mode: "cancelled" }
-          }
-          answers.push(`${q.question}: ${singleResult.answer}`)
-        }
-        return {
-          answer: answers.join("\n"),
-          mode: "select",
-        }
-      }
-
-      const questionText = input.question ?? ""
-      const options = input.options ?? []
-
-      if (options.length === 0) {
-        const answer = await ui.input(questionText)
+      if (!input.options || input.options.length === 0) {
+        const answer = await ui.input(input.question)
         return answer === null
           ? { answer: null, mode: "cancelled" }
           : { answer, mode: "input" }
       }
 
       const allowCustom = input.allowCustom ?? true
-      const multiSelect = input.multiSelect ?? false
-      const labelToOriginal = normalizeQuestionOptions(options)
+      const labelToOriginal = normalizeQuestionOptions(input.options)
       const customLabel = allowCustom
         ? resolveCustomSentinelLabel(labelToOriginal)
         : null
@@ -210,51 +127,21 @@ export function createAskUserQuestionTool() {
         ? [...labelToOriginal.keys(), customLabel]
         : [...labelToOriginal.keys()]
 
-      const selected = await ui.select(questionText, displayOptions, multiSelect)
+      const selected = await ui.select(input.question, displayOptions)
 
       if (selected === null) {
         return { answer: null, mode: "cancelled" }
       }
 
-      if (multiSelect) {
-        const selectedArray = Array.isArray(selected) ? selected : [selected]
-        const finalAnswers: string[] = []
-        for (const item of selectedArray) {
-          if (allowCustom && customLabel && item === customLabel) {
-            const customAnswer = await ui.input("Your answer")
-            if (customAnswer !== null && customAnswer.trim().length > 0) {
-              finalAnswers.push(customAnswer.trim())
-            }
-          } else {
-            finalAnswers.push(labelToOriginal.get(item) ?? item)
-          }
-        }
-        if (finalAnswers.length === 0) {
-          return { answer: null, mode: "cancelled" }
-        }
-        return {
-          answer: finalAnswers.join(", "),
-          selected: finalAnswers,
-          mode: "select",
-        }
-      }
-
-      const singleSelected = Array.isArray(selected) ? selected[0] : selected
-      if (!singleSelected) {
-        return { answer: null, mode: "cancelled" }
-      }
-
-      if (allowCustom && customLabel && singleSelected === customLabel) {
+      if (allowCustom && customLabel && selected === customLabel) {
         const customAnswer = await ui.input("Your answer")
         return customAnswer === null
           ? { answer: null, mode: "cancelled" }
           : { answer: customAnswer, mode: "custom" }
       }
 
-      const original = labelToOriginal.get(singleSelected) ?? singleSelected
       return {
-        answer: original,
-        selected: [original],
+        answer: labelToOriginal.get(selected) ?? selected,
         mode: "select",
       }
     },

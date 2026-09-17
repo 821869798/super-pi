@@ -12,7 +12,6 @@ import { createArtifactHelperTool } from "../extensions/ce-core/tools/artifact-h
 import {
   createAskUserQuestionTool,
   normalizeQuestionOptions,
-  isAskUserQuestionDisabled,
   toOptionDisplayLabel,
 } from "../extensions/ce-core/tools/ask-user-question"
 import { AskUserQuestionSelector, createAskUserQuestionCustomFactory } from "../extensions/ce-core/tools/ask-user-question-ui"
@@ -310,136 +309,6 @@ describe("ask_user_question", () => {
     )
 
     expect(result.answer).toBe("Option 1")
-    expect(result.mode).toBe("select")
-  })
-
-  test("executes batch questions sequentially and combines answers", async () => {
-    const tool = createAskUserQuestionTool()
-    const questions = [
-      { question: "Pick architecture", options: ["Monolith", "Microservices"], allowCustom: false },
-      { question: "Pick database", options: ["Postgres", "SQLite"], allowCustom: false },
-    ]
-
-    const promptOrder: string[] = []
-    const result = await tool.execute(
-      { questions },
-      {
-        input: async () => null,
-        select: async (q, options) => {
-          promptOrder.push(q)
-          return options[0]
-        },
-      },
-    )
-
-    expect(promptOrder).toEqual(["Pick architecture", "Pick database"])
-    expect(result.answer).toBe("Pick architecture: Monolith\nPick database: Postgres")
-    expect(result.mode).toBe("select")
-  })
-
-  test("batch questions abort and return cancelled if any question is cancelled", async () => {
-    const tool = createAskUserQuestionTool()
-    const questions = [
-      { question: "Q1", options: ["A", "B"], allowCustom: false },
-      { question: "Q2", options: ["C", "D"], allowCustom: false },
-    ]
-
-    let callCount = 0
-    const result = await tool.execute(
-      { questions },
-      {
-        input: async () => null,
-        select: async () => {
-          callCount += 1
-          return null // Cancel first question
-        },
-      },
-    )
-
-    expect(callCount).toBe(1)
-    expect(result.answer).toBeNull()
-    expect(result.mode).toBe("cancelled")
-  })
-
-  test("isAskUserQuestionDisabled checks environment variable and settings files", async () => {
-    const tmpDir = path.join("/tmp", `pi-disable-test-${Date.now()}`)
-    await mkdir(path.join(tmpDir, ".pi"), { recursive: true })
-
-    expect(isAskUserQuestionDisabled(tmpDir)).toBe(false)
-
-    // Check settings.json disableBuiltinAskUserQuestion
-    await writeFile(
-      path.join(tmpDir, ".pi", "settings.json"),
-      JSON.stringify({ disableBuiltinAskUserQuestion: true }),
-      "utf8",
-    )
-    expect(isAskUserQuestionDisabled(tmpDir)).toBe(true)
-
-    // Check settings.json externalAskUserQuestion
-    await writeFile(
-      path.join(tmpDir, ".pi", "settings.json"),
-      JSON.stringify({ externalAskUserQuestion: true }),
-      "utf8",
-    )
-    expect(isAskUserQuestionDisabled(tmpDir)).toBe(true)
-
-    // Check env var override
-    await writeFile(
-      path.join(tmpDir, ".pi", "settings.json"),
-      JSON.stringify({ disableBuiltinAskUserQuestion: false }),
-      "utf8",
-    )
-    expect(isAskUserQuestionDisabled(tmpDir)).toBe(false)
-
-    const origEnv = process.env.SUPER_PI_DISABLE_ASK_USER_QUESTION
-    try {
-      process.env.SUPER_PI_DISABLE_ASK_USER_QUESTION = "1"
-      expect(isAskUserQuestionDisabled(tmpDir)).toBe(true)
-    } finally {
-      if (origEnv !== undefined) {
-        process.env.SUPER_PI_DISABLE_ASK_USER_QUESTION = origEnv
-      } else {
-        delete process.env.SUPER_PI_DISABLE_ASK_USER_QUESTION
-      }
-    }
-  })
-
-  test("supports multiSelect returning joined answer and selected array", async () => {
-    const tool = createAskUserQuestionTool()
-    const options = ["Option A", "Option B", "Option C"]
-
-    const result = await tool.execute(
-      { question: "Choose features", options, multiSelect: true, allowCustom: false },
-      {
-        input: async () => null,
-        select: async (_q, displayOpts, multiSelect) => {
-          expect(multiSelect).toBe(true)
-          return [displayOpts[0], displayOpts[2]]
-        },
-      },
-    )
-
-    expect(result.answer).toBe("Option A, Option C")
-    expect(result.selected).toEqual(["Option A", "Option C"])
-    expect(result.mode).toBe("select")
-  })
-
-  test("supports multiSelect with custom answer combined", async () => {
-    const tool = createAskUserQuestionTool()
-    const options = ["Feature 1", "Feature 2"]
-
-    const result = await tool.execute(
-      { question: "Choose features", options, multiSelect: true, allowCustom: true },
-      {
-        input: async () => "Custom Feature 3",
-        select: async (_q, displayOpts) => {
-          return [displayOpts[0], displayOpts[2]]
-        },
-      },
-    )
-
-    expect(result.answer).toBe("Feature 1, Custom Feature 3")
-    expect(result.selected).toEqual(["Feature 1", "Custom Feature 3"])
     expect(result.mode).toBe("select")
   })
 })
@@ -2453,91 +2322,46 @@ describe("ask_user_question custom selector component", () => {
     expect(captured.selectedLabel).toBe("A")
   })
 
-  test("multiSelect renders checkboxes [ ] and toggles with Space", () => {
-    const selector = new AskUserQuestionSelector(
-      { question: "Choose multiple", displayOptions: ["Alpha", "Beta"], customLabel: null, multiSelect: true },
-      noopTheme,
-      () => {},
-    )
-    let lines = selector.render(60)
-    expect(lines.join("\n")).toContain("[ ] Alpha")
-    expect(lines.join("\n")).toContain("[ ] Beta")
-
-    // Press Space on Alpha (index 0)
-    selector.handleInput(" ")
-    lines = selector.render(60)
-    expect(lines.join("\n")).toContain("[✓] Alpha")
-    expect(lines.join("\n")).toContain("[ ] Beta")
-
-    // Press Space again to untoggle
-    selector.handleInput(" ")
-    lines = selector.render(60)
-    expect(lines.join("\n")).toContain("[ ] Alpha")
-  })
-
-  test("multiSelect toggles with number keys 1-9 without immediate commit", () => {
+  test("Esc while collapsed uncollapses without cancelling the prompt", () => {
     let captured: any = null
     const selector = new AskUserQuestionSelector(
-      { question: "Choose multiple", displayOptions: ["Alpha", "Beta", "Gamma"], customLabel: null, multiSelect: true },
+      { question: "Check history", displayOptions: ["A", "B"], customLabel: null },
       noopTheme,
       (res) => { captured = res },
     )
-    // Press '2' -> should toggle Beta, NOT commit
-    selector.handleInput("2")
+    // Collapse via Ctrl+]
+    selector.handleInput("\u001d")
+    let lines = selector.render(60)
+    expect(lines.join("\n")).toContain("Ctrl+] to expand")
+
+    // Press Esc while collapsed -> uncollapses, does NOT cancel
+    selector.handleInput("\u001b")
     expect(captured).toBeNull()
-
-    let lines = selector.render(60)
-    expect(lines.join("\n")).toContain("[✓] Beta")
-    expect(lines.join("\n")).toContain("[ ] Alpha")
-
-    // Press '1' -> toggle Alpha
-    selector.handleInput("1")
     lines = selector.render(60)
-    expect(lines.join("\n")).toContain("[✓] Alpha")
-    expect(lines.join("\n")).toContain("[✓] Beta")
+    expect(lines.join("\n")).toContain("1. A")
 
-    // Press Enter -> commit both
-    selector.handleInput("\r")
+    // Now press Esc while expanded -> cancels
+    selector.handleInput("\u001b")
     expect(captured).not.toBeNull()
-    expect(captured.selectedLabels).toEqual(["Alpha", "Beta"])
-    expect(captured.selectedLabel).toBe("Alpha, Beta")
+    expect(captured.selectedLabel).toBeNull()
   })
 
-  test("multiSelect 'a' key toggles all items", () => {
+  test("non-digit or invalid digit strings are ignored by number picker", () => {
     let captured: any = null
     const selector = new AskUserQuestionSelector(
-      { question: "Select all", displayOptions: ["A", "B", "C"], customLabel: null, multiSelect: true },
+      { question: "Pick", displayOptions: ["Alpha", "Beta", "Gamma"], customLabel: null },
       noopTheme,
       (res) => { captured = res },
     )
-    // Press 'a' -> select all
-    selector.handleInput("a")
-    let lines = selector.render(60)
-    expect(lines.join("\n")).toContain("[✓] A")
-    expect(lines.join("\n")).toContain("[✓] B")
-    expect(lines.join("\n")).toContain("[✓] C")
-
-    // Press 'a' again -> deselect all
-    selector.handleInput("a")
-    lines = selector.render(60)
-    expect(lines.join("\n")).toContain("[ ] A")
-    expect(lines.join("\n")).toContain("[ ] B")
-    expect(lines.join("\n")).toContain("[ ] C")
-  })
-
-  test("multiSelect Enter without toggling defaults to focused item", () => {
-    let captured: any = null
-    const selector = new AskUserQuestionSelector(
-      { question: "Pick one or more", displayOptions: ["Alpha", "Beta"], customLabel: null, multiSelect: true },
-      noopTheme,
-      (res) => { captured = res },
-    )
-    // Move down to Beta
-    selector.handleInput("\u001b[B")
-    // Press Enter directly
-    selector.handleInput("\r")
+    selector.handleInput("3x")
+    expect(captured).toBeNull()
+    selector.handleInput("0")
+    expect(captured).toBeNull()
+    selector.handleInput("4")
+    expect(captured).toBeNull()
+    selector.handleInput("3")
     expect(captured).not.toBeNull()
-    expect(captured.selectedLabels).toEqual(["Beta"])
+    expect(captured.selectedLabel).toBe("Gamma")
   })
 })
 
@@ -2554,29 +2378,6 @@ describe("ask_user_question registration serialization", () => {
     ceCoreExtension(pi as never)
     return definitions.get("ask_user_question")
   }
-
-  test("does not register ask_user_question when disabled via env var", () => {
-    const orig = process.env.SUPER_PI_DISABLE_ASK_USER_QUESTION
-    try {
-      process.env.SUPER_PI_DISABLE_ASK_USER_QUESTION = "1"
-      const definitions = new Map<string, any>()
-      const pi = {
-        registerTool(definition: { name: string }) {
-          definitions.set(definition.name, definition)
-        },
-        on(_event: string, _handler: any) {},
-        registerCommand(_name: string, _def: any) {},
-      }
-      ceCoreExtension(pi as never)
-      expect(definitions.has("ask_user_question")).toBe(false)
-    } finally {
-      if (orig !== undefined) {
-        process.env.SUPER_PI_DISABLE_ASK_USER_QUESTION = orig
-      } else {
-        delete process.env.SUPER_PI_DISABLE_ASK_USER_QUESTION
-      }
-    }
-  })
 
   test("serializes concurrent ask_user_question UI calls (no parallel selectors)", async () => {
     const askUserQuestion = registerOnlyAskUserQuestion()
