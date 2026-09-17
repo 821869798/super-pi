@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { Type } from "typebox"
 import { createArtifactHelperTool, type ArtifactType } from "./tools/artifact-helper"
-import { createAskUserQuestionTool, CUSTOM_SENTINEL } from "./tools/ask-user-question"
+import { createAskUserQuestionTool, CUSTOM_SENTINEL, isAskUserQuestionDisabled } from "./tools/ask-user-question"
 import { createAskUserQuestionCustomFactory } from "./tools/ask-user-question-ui"
 import { createWorkflowStateTool } from "./tools/workflow-state"
 import { createWorktreeManagerTool } from "./tools/worktree-manager"
@@ -98,9 +98,15 @@ const artifactHelperParams = Type.Object({
 })
 
 const askUserQuestionParams = Type.Object({
-  question: Type.String({ description: "Question shown to the user" }),
-  options: Type.Optional(Type.Array(Type.String(), { description: "Selectable options" })),
+  question: Type.Optional(Type.String({ description: "Question shown to the user" })),
+  options: Type.Optional(Type.Array(Type.Any(), { description: "Selectable options (strings or {label, description} objects)" })),
   allowCustom: Type.Optional(Type.Boolean({ description: "Allow a custom answer when options are present" })),
+  questions: Type.Optional(Type.Array(Type.Object({
+    question: Type.String({ description: "Question shown to the user" }),
+    header: Type.Optional(Type.String({ description: "Optional header or category for the question" })),
+    options: Type.Optional(Type.Array(Type.Any(), { description: "Selectable options" })),
+    allowCustom: Type.Optional(Type.Boolean({ description: "Allow custom answer" })),
+  }), { description: "Optional batch of questions to ask" })),
 })
 
 const workflowStateParams = Type.Object({
@@ -303,48 +309,51 @@ export default function ceCoreExtension(pi: ExtensionAPI) {
     },
   })
 
-  pi.registerTool({
-    name: askUserQuestion.name,
-    label: "Ask User Question",
-    description: "Ask the user a structured question with optional choices and custom answers.",
-    promptSnippet: "Ask the user a structured question with optional choices and custom answers",
-    promptGuidelines: [
-      "Call ask_user_question one at a time, never two or more in the same assistant message: Pi renders selectors on a shared singleton, so parallel ask_user_question calls silently fail with 'No result provided'.",
-      "For ask_user_question, keep the question concise and put long analysis in prior text or a file first; ask_user_question normalizes long options to short labels but the full answer is still returned to you.",
-    ],
-    parameters: askUserQuestionParams,
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      if (!ctx.hasUI) {
-        return {
-          isError: true,
-          content: [{ type: "text", text: "UI is unavailable in this mode." }],
-          details: { answer: null, mode: "cancelled" },
+  if (!isAskUserQuestionDisabled()) {
+    pi.registerTool({
+      name: askUserQuestion.name,
+      label: "Ask User Question",
+      description: "Ask the user a structured question with optional choices and custom answers.",
+      promptSnippet: "Ask the user a structured question with optional choices and custom answers",
+      promptGuidelines: [
+        "Call ask_user_question one at a time, never two or more in the same assistant message: Pi renders selectors on a shared singleton, so parallel ask_user_question calls silently fail with 'No result provided'.",
+        "For ask_user_question, keep the question concise and put long analysis in prior text or a file first; ask_user_question normalizes long options to short labels but the full answer is still returned to you.",
+      ],
+      parameters: askUserQuestionParams,
+      async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        if (!ctx.hasUI) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: "UI is unavailable in this mode." }],
+            details: { answer: null, mode: "cancelled" },
+          }
         }
-      }
 
-      const result = await runAskUserQuestionExclusive(() => askUserQuestion.execute(
-        {
-          question: params.question,
-          options: params.options,
-          allowCustom: params.allowCustom,
-        },
-        buildAskUserQuestionUi(ctx),
-      ))
+        const result = await runAskUserQuestionExclusive(() => askUserQuestion.execute(
+          {
+            question: params.question,
+            options: params.options,
+            allowCustom: params.allowCustom,
+            questions: params.questions,
+          },
+          buildAskUserQuestionUi(ctx),
+        ))
 
-      const contentText = result.answer === null
-        ? "User cancelled."
-        : result.mode === "custom"
-          ? `User answered: ${result.answer}`
-          : result.mode === "select"
-            ? `User selected: ${result.answer}`
-            : `User answered: ${result.answer}`
+        const contentText = result.answer === null
+          ? "User cancelled."
+          : result.mode === "custom"
+            ? `User answered: ${result.answer}`
+            : result.mode === "select"
+              ? `User selected: ${result.answer}`
+              : `User answered: ${result.answer}`
 
-      return {
-        content: [{ type: "text", text: contentText }],
-        details: result,
-      }
-    },
-  })
+        return {
+          content: [{ type: "text", text: contentText }],
+          details: result,
+        }
+      },
+    })
+  }
 
   pi.registerTool({
     name: workflowState.name,

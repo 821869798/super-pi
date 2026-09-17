@@ -1,7 +1,21 @@
-export interface AskUserQuestionInput {
+import { readFileSync } from "node:fs"
+import path from "node:path"
+import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent"
+
+export type QuestionOption = string | { label: string; description?: string }
+
+export interface SingleQuestionInput {
   question: string
-  options?: string[]
+  options?: QuestionOption[]
   allowCustom?: boolean
+  header?: string
+}
+
+export interface AskUserQuestionInput {
+  question?: string
+  options?: QuestionOption[]
+  allowCustom?: boolean
+  questions?: SingleQuestionInput[]
 }
 
 export interface AskUserQuestionUi {
@@ -27,14 +41,27 @@ export const MAX_OPTION_LABEL_WIDTH = 60
 
 /**
  * Build the single-line display label for one option.
+ * Supports string options and structured { label, description } objects.
  *
  * Rules:
  * - Take only the first line (drop embedded `\n`).
  * - Trim surrounding whitespace.
  * - Truncate to {@link MAX_OPTION_LABEL_WIDTH} with an ellipsis when needed.
  */
-export function toOptionDisplayLabel(option: string): string {
-  const firstLine = option.split("\n", 1)[0] ?? ""
+export function toOptionDisplayLabel(option: QuestionOption): string {
+  if (typeof option === "object" && option !== null && "label" in option) {
+    const label = option.label.trim()
+    const desc = option.description?.trim()
+    const combined = desc ? `${label} — ${desc}` : label
+    const firstLine = combined.split("\n", 1)[0] ?? ""
+    const trimmed = firstLine.trim()
+    if (trimmed.length <= MAX_OPTION_LABEL_WIDTH) {
+      return trimmed
+    }
+    return trimmed.slice(0, MAX_OPTION_LABEL_WIDTH - 1) + "…"
+  }
+  const str = String(option)
+  const firstLine = str.split("\n", 1)[0] ?? ""
   const trimmed = firstLine.trim()
   if (trimmed.length <= MAX_OPTION_LABEL_WIDTH) {
     return trimmed
@@ -49,7 +76,7 @@ export function toOptionDisplayLabel(option: string): string {
  * @returns A map from display label back to the original full option string.
  *          When collisions exist, labels become `<label> (#<n>)`.
  */
-export function normalizeQuestionOptions(options: string[]): Map<string, string> {
+export function normalizeQuestionOptions(options: QuestionOption[]): Map<string, string> {
   const labelToOriginal = new Map<string, string>()
   const labelCounts = new Map<string, number>()
 
@@ -67,7 +94,11 @@ export function normalizeQuestionOptions(options: string[]): Map<string, string>
       dedup += 1
       label = `${baseLabel} (#${dedup})`
     }
-    labelToOriginal.set(label, original)
+
+    const resolvedValue = typeof original === "object" && original !== null && "label" in original
+      ? original.label
+      : String(original)
+    labelToOriginal.set(label, resolvedValue)
   }
 
   return labelToOriginal
@@ -85,6 +116,46 @@ export function resolveCustomSentinelLabel(labelToOriginal: Map<string, string>)
   return `${CUSTOM_SENTINEL} (#${index})`
 }
 
+/**
+ * Determine whether the built-in ask_user_question tool should be disabled,
+ * e.g. to coexist with third-party extensions like @juicesharp/rpiv-ask-user-question.
+ */
+export function isAskUserQuestionDisabled(cwd: string = process.cwd()): boolean {
+  if (process.env.SUPER_PI_DISABLE_ASK_USER_QUESTION === "1") {
+    return true
+  }
+  const configDir = CONFIG_DIR_NAME || ".pi"
+  const projectPath = path.join(cwd, configDir, "settings.json")
+  try {
+    const raw = readFileSync(projectPath, "utf8")
+    const parsed = JSON.parse(raw)
+    if (parsed.disableBuiltinAskUserQuestion === true || parsed.externalAskUserQuestion === true) {
+      return true
+    }
+  } catch {}
+
+  const home = process.env.HOME || process.env.USERPROFILE || "~"
+  const globalPath = path.join(home, configDir, "agent", "settings.json")
+  try {
+    const raw = readFileSync(globalPath, "utf8")
+    const parsed = JSON.parse(raw)
+    if (parsed.disableBuiltinAskUserQuestion === true || parsed.externalAskUserQuestion === true) {
+      return true
+    }
+  } catch {}
+
+  const altGlobalPath = path.join(home, configDir, "settings.json")
+  try {
+    const raw = readFileSync(altGlobalPath, "utf8")
+    const parsed = JSON.parse(raw)
+    if (parsed.disableBuiltinAskUserQuestion === true || parsed.externalAskUserQuestion === true) {
+      return true
+    }
+  } catch {}
+
+  return false
+}
+
 export function createAskUserQuestionTool() {
   return {
     name: "ask_user_question",
@@ -92,10 +163,34 @@ export function createAskUserQuestionTool() {
       input: AskUserQuestionInput,
       ui: AskUserQuestionUi,
     ): Promise<AskUserQuestionResult> {
+      // Support batch/canonical questions array
+      if (input.questions && input.questions.length > 0) {
+        const answers: string[] = []
+        for (const q of input.questions) {
+          const singleResult = await this.execute(
+            {
+              question: q.question,
+              options: q.options,
+              allowCustom: q.allowCustom,
+            },
+            ui,
+          )
+          if (singleResult.answer === null) {
+            return { answer: null, mode: "cancelled" }
+          }
+          answers.push(`${q.question}: ${singleResult.answer}`)
+        }
+        return {
+          answer: answers.join("\n"),
+          mode: "select",
+        }
+      }
+
+      const questionText = input.question ?? ""
       const options = input.options ?? []
 
       if (options.length === 0) {
-        const answer = await ui.input(input.question)
+        const answer = await ui.input(questionText)
         return answer === null
           ? { answer: null, mode: "cancelled" }
           : { answer, mode: "input" }
@@ -110,7 +205,7 @@ export function createAskUserQuestionTool() {
         ? [...labelToOriginal.keys(), customLabel]
         : [...labelToOriginal.keys()]
 
-      const selected = await ui.select(input.question, displayOptions)
+      const selected = await ui.select(questionText, displayOptions)
 
       if (selected === null) {
         return { answer: null, mode: "cancelled" }

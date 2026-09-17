@@ -9,7 +9,12 @@ import {
   getRunArtifactPath,
 } from "../extensions/ce-core/utils/artifact-paths"
 import { createArtifactHelperTool } from "../extensions/ce-core/tools/artifact-helper"
-import { createAskUserQuestionTool, normalizeQuestionOptions } from "../extensions/ce-core/tools/ask-user-question"
+import {
+  createAskUserQuestionTool,
+  normalizeQuestionOptions,
+  isAskUserQuestionDisabled,
+  toOptionDisplayLabel,
+} from "../extensions/ce-core/tools/ask-user-question"
 import { AskUserQuestionSelector, createAskUserQuestionCustomFactory } from "../extensions/ce-core/tools/ask-user-question-ui"
 import { createWorkflowStateTool } from "../extensions/ce-core/tools/workflow-state"
 import { createWorktreeManagerTool } from "../extensions/ce-core/tools/worktree-manager"
@@ -279,6 +284,124 @@ describe("ask_user_question", () => {
 
     // No display label may collide with an unrelated original's suffix form.
     expect(labels.filter((l) => l === "X (#2)").length).toBe(1)
+  })
+
+  test("toOptionDisplayLabel formats { label, description } objects", () => {
+    expect(toOptionDisplayLabel({ label: "Fast", description: "Minimal checks" })).toBe("Fast — Minimal checks")
+    expect(toOptionDisplayLabel({ label: "Clean" })).toBe("Clean")
+  })
+
+  test("supports structured { label, description } options returning the label", async () => {
+    const tool = createAskUserQuestionTool()
+    const options = [
+      { label: "Option 1", description: "First choice" },
+      { label: "Option 2", description: "Second choice" },
+    ]
+
+    const result = await tool.execute(
+      { question: "Choose an option", options, allowCustom: false },
+      {
+        input: async () => null,
+        select: async (_q, displayOptions) => {
+          expect(displayOptions[0]).toBe("Option 1 — First choice")
+          return displayOptions[0]
+        },
+      },
+    )
+
+    expect(result.answer).toBe("Option 1")
+    expect(result.mode).toBe("select")
+  })
+
+  test("executes batch questions sequentially and combines answers", async () => {
+    const tool = createAskUserQuestionTool()
+    const questions = [
+      { question: "Pick architecture", options: ["Monolith", "Microservices"], allowCustom: false },
+      { question: "Pick database", options: ["Postgres", "SQLite"], allowCustom: false },
+    ]
+
+    const promptOrder: string[] = []
+    const result = await tool.execute(
+      { questions },
+      {
+        input: async () => null,
+        select: async (q, options) => {
+          promptOrder.push(q)
+          return options[0]
+        },
+      },
+    )
+
+    expect(promptOrder).toEqual(["Pick architecture", "Pick database"])
+    expect(result.answer).toBe("Pick architecture: Monolith\nPick database: Postgres")
+    expect(result.mode).toBe("select")
+  })
+
+  test("batch questions abort and return cancelled if any question is cancelled", async () => {
+    const tool = createAskUserQuestionTool()
+    const questions = [
+      { question: "Q1", options: ["A", "B"], allowCustom: false },
+      { question: "Q2", options: ["C", "D"], allowCustom: false },
+    ]
+
+    let callCount = 0
+    const result = await tool.execute(
+      { questions },
+      {
+        input: async () => null,
+        select: async () => {
+          callCount += 1
+          return null // Cancel first question
+        },
+      },
+    )
+
+    expect(callCount).toBe(1)
+    expect(result.answer).toBeNull()
+    expect(result.mode).toBe("cancelled")
+  })
+
+  test("isAskUserQuestionDisabled checks environment variable and settings files", async () => {
+    const tmpDir = path.join("/tmp", `pi-disable-test-${Date.now()}`)
+    await mkdir(path.join(tmpDir, ".pi"), { recursive: true })
+
+    expect(isAskUserQuestionDisabled(tmpDir)).toBe(false)
+
+    // Check settings.json disableBuiltinAskUserQuestion
+    await writeFile(
+      path.join(tmpDir, ".pi", "settings.json"),
+      JSON.stringify({ disableBuiltinAskUserQuestion: true }),
+      "utf8",
+    )
+    expect(isAskUserQuestionDisabled(tmpDir)).toBe(true)
+
+    // Check settings.json externalAskUserQuestion
+    await writeFile(
+      path.join(tmpDir, ".pi", "settings.json"),
+      JSON.stringify({ externalAskUserQuestion: true }),
+      "utf8",
+    )
+    expect(isAskUserQuestionDisabled(tmpDir)).toBe(true)
+
+    // Check env var override
+    await writeFile(
+      path.join(tmpDir, ".pi", "settings.json"),
+      JSON.stringify({ disableBuiltinAskUserQuestion: false }),
+      "utf8",
+    )
+    expect(isAskUserQuestionDisabled(tmpDir)).toBe(false)
+
+    const origEnv = process.env.SUPER_PI_DISABLE_ASK_USER_QUESTION
+    try {
+      process.env.SUPER_PI_DISABLE_ASK_USER_QUESTION = "1"
+      expect(isAskUserQuestionDisabled(tmpDir)).toBe(true)
+    } finally {
+      if (origEnv !== undefined) {
+        process.env.SUPER_PI_DISABLE_ASK_USER_QUESTION = origEnv
+      } else {
+        delete process.env.SUPER_PI_DISABLE_ASK_USER_QUESTION
+      }
+    }
   })
 })
 
@@ -2233,6 +2356,63 @@ describe("ask_user_question custom selector component", () => {
     expect(first.selectedLabel).toBe("A")
     expect(captured as { selectedLabel: string | null } | null).toStrictEqual(first)
   })
+
+  test("number keys 1-9 immediately select matching option", () => {
+    let captured: { selectedLabel: string | null } | null = null
+    const selector = new AskUserQuestionSelector(
+      { question: "Pick", displayOptions: ["Alpha", "Beta", "Gamma"], customLabel: null },
+      noopTheme,
+      (result) => { captured = result },
+    )
+    selector.handleInput("2")
+    expect(captured).not.toBeNull()
+    expect(captured!.selectedLabel).toBe("Beta")
+  })
+
+  test("renders 1. and 2. prefixes for the first options", () => {
+    const selector = new AskUserQuestionSelector(
+      { question: "Pick", displayOptions: ["Alpha", "Beta"], customLabel: null },
+      noopTheme,
+      () => {},
+    )
+    const lines = selector.render(60)
+    const joined = lines.join("\n")
+    expect(joined).toContain("1. Alpha")
+    expect(joined).toContain("2. Beta")
+  })
+
+  test("Ctrl+] toggles collapsed mode for transcript peeking", () => {
+    const selector = new AskUserQuestionSelector(
+      { question: "Check history", displayOptions: ["A", "B"], customLabel: null },
+      noopTheme,
+      () => {},
+    )
+    let lines = selector.render(60)
+    expect(lines.join("\n")).toContain("1. A")
+
+    // Press Ctrl+] (\u001d)
+    selector.handleInput("\u001d")
+    lines = selector.render(60)
+    expect(lines.join("\n")).toContain("Press Ctrl+] to expand")
+    expect(lines.join("\n")).not.toContain("1. A")
+
+    // Pressing option numbers while collapsed should not select
+    let captured: any = null
+    const collapsedSelector = new AskUserQuestionSelector(
+      { question: "Check history", displayOptions: ["A", "B"], customLabel: null },
+      noopTheme,
+      (res) => { captured = res },
+    )
+    collapsedSelector.handleInput("\u001d")
+    collapsedSelector.handleInput("1")
+    expect(captured).toBeNull()
+
+    // Press Ctrl+] again to expand and select
+    collapsedSelector.handleInput("\u001d")
+    collapsedSelector.handleInput("1")
+    expect(captured).not.toBeNull()
+    expect(captured.selectedLabel).toBe("A")
+  })
 })
 
 describe("ask_user_question registration serialization", () => {
@@ -2248,6 +2428,29 @@ describe("ask_user_question registration serialization", () => {
     ceCoreExtension(pi as never)
     return definitions.get("ask_user_question")
   }
+
+  test("does not register ask_user_question when disabled via env var", () => {
+    const orig = process.env.SUPER_PI_DISABLE_ASK_USER_QUESTION
+    try {
+      process.env.SUPER_PI_DISABLE_ASK_USER_QUESTION = "1"
+      const definitions = new Map<string, any>()
+      const pi = {
+        registerTool(definition: { name: string }) {
+          definitions.set(definition.name, definition)
+        },
+        on(_event: string, _handler: any) {},
+        registerCommand(_name: string, _def: any) {},
+      }
+      ceCoreExtension(pi as never)
+      expect(definitions.has("ask_user_question")).toBe(false)
+    } finally {
+      if (orig !== undefined) {
+        process.env.SUPER_PI_DISABLE_ASK_USER_QUESTION = orig
+      } else {
+        delete process.env.SUPER_PI_DISABLE_ASK_USER_QUESTION
+      }
+    }
+  })
 
   test("serializes concurrent ask_user_question UI calls (no parallel selectors)", async () => {
     const askUserQuestion = registerOnlyAskUserQuestion()
